@@ -2,13 +2,13 @@
 """
 IGUS Rebel – Puck Pick & Sort  v3.2.1
 =====================================
-Neu gegenüber v3.2:
+Neu gegenueber v3.2:
   - Physische Slot-Belegung statt farb-basierter:
     _red_slots_occupied / _blue_slots_occupied erfassen JEDEN Puck im Slot,
-    unabhängig von Farbe → kein Stapeln mehr möglich
+    unabhaengig von Farbe -> kein Stapeln mehr moeglich
   - _detect_occupied_slots() markiert auch falschfarbige Pucks in Reihen physisch
   - _release_physical_slot() gibt Quell-Slot nach erfolgreichem Pick frei
-  - _next_free_slot() prüft ausschließlich physische Belegung
+  - _next_free_slot() prueft ausschliesslich physische Belegung
 """
 
 import time
@@ -59,17 +59,17 @@ FILTER_Y_MAX =  0.17
 FILTER_Z_MIN = -0.01
 FILTER_Z_MAX =  0.03
 
-# ── Brett-Oberfläche ────────────────────────────────────────
+# ── Brett-Oberflaeche ────────────────────────────────────────
 BOARD_Z = 0.010   # [m]
 
 # ── Ablage-Reihen ────────────────────────────────────────────
 #
 #        Y: ROW_Y_START ─────────────── ROW_Y_END
-#        ┌────────────────────────────────────────┐  x ≈ 0.39
-#        │  ○  ○  ○  ○  ○  ○  ○  ○  ○  ○        │  ← ROT   (Reihe 1)
-#        │  ○  ○  ○  ○  ○  ○  ○  ○  ○  ○        │  ← frei  (Reihe 2)
-#        │  ○  ○  ○  ○  ○  ○  ○  ○  ○  ○        │  ← BLAU  (Reihe 3)
-#        └────────────────────────────────────────┘  x ≈ 0.29
+#        +────────────────────────────────────────+  x ~ 0.39
+#        |  o  o  o  o  o  o  o  o  o  o         |  <- ROT   (Reihe 1)
+#        |  o  o  o  o  o  o  o  o  o  o         |  <- (frei)(Reihe 2)
+#        |  o  o  o  o  o  o  o  o  o  o         |  <- BLAU  (Reihe 3)
+#        +────────────────────────────────────────+  x ~ 0.29
 #              Slot 1 ─────────────────── Slot 10
 #
 N_DROP_SLOTS = 10
@@ -88,17 +88,17 @@ ROW_BLUE_Y_END   =  0.14
 SLOT_OCCUPY_TOLERANCE = 0.03   # [m]
 
 # ── Geometrie-Offsets ───────────────────────────────────────
-LIFT_Z          = 0.07   # [m]
-APPROACH_OFFSET = 0.06   # [m]
-GRASP_OFFSET    = -0.005  # [m]  ← Greifhöhe (Pick)
-DROP_OFFSET     = 0.00  # [m]  ← Ablagehöhe (Place) – separat einstellbar
+LIFT_Z          = 0.07    # [m]
+APPROACH_OFFSET = 0.06    # [m]
+GRASP_OFFSET    = -0.005  # [m]  Greifhoehe (Pick), relativ zu pz
+DROP_OFFSET     =  0.00   # [m]  Ablagehoehe (Place), relativ zu BOARD_Z
 
 # ── Greif-Kalibrierung (Pick) ────────────────────────────────
 GRASP_X_OFFSET = 0.005
 GRASP_Y_OFFSET = 0.01
 
 # ── Ablage-Kalibrierung (Place) ──────────────────────────────
-PLACE_X_OFFSET = 0.00
+PLACE_X_OFFSET =  0.00
 PLACE_Y_OFFSET = -0.005
 
 # ── Wartezeiten ─────────────────────────────────────────────
@@ -112,8 +112,8 @@ SETTLE_TIME       = 0.2   # [s]
 
 def get_drop_position(color: str, slot_index: int) -> tuple[float, float]:
     """
-    Gibt (x, y) für den n-ten Slot inkl. PLACE_X/Y_OFFSET zurück.
-    slot_index: 0-basiert. Wenn alle Slots voll → letzter Slot wiederholt.
+    Gibt (x, y) fuer den n-ten Slot inkl. PLACE_X/Y_OFFSET zurueck.
+    slot_index: 0-basiert. Wenn alle Slots voll -> letzter Slot wiederholt.
     """
     if color == "red":
         x       = ROW_RED_X
@@ -131,15 +131,19 @@ def get_drop_position(color: str, slot_index: int) -> tuple[float, float]:
 # ═══════════════════════════════════════════════════════════
 
 def filter_valid_pucks(pucks: list[dict]):
+    """
+    Filtert Pucks ausserhalb des definierten Arbeitsbereichs heraus.
+    Gibt (valide, entfernte) zurueck.
+    """
     valid, removed = [], []
     for p in pucks:
         reasons = []
         if not (FILTER_X_MIN <= p["x"] <= FILTER_X_MAX):
-            reasons.append(f"x={p['x']:.3f} ∉ [{FILTER_X_MIN},{FILTER_X_MAX}]")
+            reasons.append(f"x={p['x']:.3f} nicht in [{FILTER_X_MIN},{FILTER_X_MAX}]")
         if not (FILTER_Y_MIN <= p["y"] <= FILTER_Y_MAX):
-            reasons.append(f"y={p['y']:.3f} ∉ [{FILTER_Y_MIN},{FILTER_Y_MAX}]")
+            reasons.append(f"y={p['y']:.3f} nicht in [{FILTER_Y_MIN},{FILTER_Y_MAX}]")
         if not (FILTER_Z_MIN <= p["z"] <= FILTER_Z_MAX):
-            reasons.append(f"z={p['z']:.3f} ∉ [{FILTER_Z_MIN},{FILTER_Z_MAX}]")
+            reasons.append(f"z={p['z']:.3f} nicht in [{FILTER_Z_MIN},{FILTER_Z_MAX}]")
         if reasons:
             removed.append((p, reasons))
         else:
@@ -148,6 +152,11 @@ def filter_valid_pucks(pucks: list[dict]):
 
 
 def cluster_puck_observations(raw: list[dict], radius: float) -> list[dict]:
+    """
+    Fasst mehrere Kamera-Beobachtungen desselben Pucks zu einem Eintrag zusammen.
+    Beobachtungen innerhalb von 'radius' Metern werden zu einem Cluster vereint.
+    Cluster mit weniger als MIN_OBSERVATIONS Messungen werden verworfen.
+    """
     if not raw:
         return []
     used  = [False] * len(raw)
@@ -215,10 +224,9 @@ class PuckSortController(Node):
             callback_group=self.callback_group
         )
 
-        # ── Physische Slot-Belegung ─────────────────────────────
-        # Erfasst JEDEN Puck im Slot, egal welche Farbe.
-        # _next_free_slot() prüft ausschließlich diese Sets →
-        # verhindert Stapeln beim Umräumen und Sortieren.
+        # Physische Slot-Belegung: erfasst JEDEN Puck im Slot, egal welche Farbe.
+        # _next_free_slot() prueft ausschliesslich diese Sets ->
+        # verhindert Stapeln beim Umraeumen und Sortieren.
         self._red_slots_occupied:  set[int] = set()
         self._blue_slots_occupied: set[int] = set()
 
@@ -233,7 +241,7 @@ class PuckSortController(Node):
         self.scene_publisher.publish(scene)
         time.sleep(0.5)
         self.get_logger().info(
-            f"Planungsszene: {len(igus.COLLISION_OBJECTS)} Kollisionsobjekte."
+            f"Planungsszene: {len(igus.COLLISION_OBJECTS)} Kollisionsobjekte geladen."
         )
 
     # ──────────────────────────────────────────────────────
@@ -262,27 +270,27 @@ class PuckSortController(Node):
 
     def _next_free_slot(self, color: str) -> int:
         """
-        Gibt den nächsten physisch freien Slot-Index zurück.
-        Prüft _red_slots_occupied / _blue_slots_occupied →
-        egal ob roter oder blauer Puck drin liegt, der Slot wird übersprungen.
+        Gibt den naechsten physisch freien Slot-Index zurueck.
+        Prueft _red_slots_occupied / _blue_slots_occupied ->
+        egal ob roter oder blauer Puck drin liegt, der Slot wird uebersprungen.
         """
         occupied = self._red_slots_occupied if color == "red" else self._blue_slots_occupied
         for i in range(N_DROP_SLOTS):
             if i not in occupied:
                 return i
         self.get_logger().error(
-            f"  ⚠ ALLE {color.upper()} SLOTS PHYSISCH BELEGT – Notfall-Fallback Slot 0!"
+            f"  [WARN] ALLE {color.upper()} SLOTS PHYSISCH BELEGT – Notfall-Fallback Slot 0!"
         )
-        return 0  # Notfall-Fallback (sollte nie eintreten)
+        return 0
 
     def _release_physical_slot(self, px: float, py: float):
         """
         Wird nach einem erfolgreichen Pick aufgerufen.
-        Erkennt anhand der Scan-Position (px, py), in welchem Slot
-        der Puck lag, und entfernt diesen aus dem physischen Belegungs-Set.
-        Pucks die nicht in einer Reihe lagen → kein Eintrag vorhanden, kein Effekt.
+        Erkennt anhand der Scan-Position (px, py), in welchem Slot der Puck lag,
+        und entfernt diesen aus dem physischen Belegungs-Set.
+        Pucks die nicht in einer Reihe lagen -> kein Eintrag vorhanden, kein Effekt.
         """
-        red_y_slots  = np.linspace(ROW_RED_Y_START, ROW_RED_Y_END,  N_DROP_SLOTS)
+        red_y_slots  = np.linspace(ROW_RED_Y_START,  ROW_RED_Y_END,  N_DROP_SLOTS)
         blue_y_slots = np.linspace(ROW_BLUE_Y_START, ROW_BLUE_Y_END, N_DROP_SLOTS)
 
         if abs(px - ROW_RED_X) <= SLOT_OCCUPY_TOLERANCE:
@@ -291,7 +299,7 @@ class PuckSortController(Node):
             if dists[closest] <= SLOT_OCCUPY_TOLERANCE:
                 self._red_slots_occupied.discard(closest)
                 self.get_logger().info(
-                    f"  🔓 Roter Slot {closest+1} physisch freigegeben."
+                    f"  [FREE] Roter Slot {closest+1} physisch freigegeben."
                 )
 
         elif abs(px - ROW_BLUE_X) <= SLOT_OCCUPY_TOLERANCE:
@@ -300,17 +308,17 @@ class PuckSortController(Node):
             if dists[closest] <= SLOT_OCCUPY_TOLERANCE:
                 self._blue_slots_occupied.discard(closest)
                 self.get_logger().info(
-                    f"  🔓 Blauer Slot {closest+1} physisch freigegeben."
+                    f"  [FREE] Blauer Slot {closest+1} physisch freigegeben."
                 )
 
     def _detect_occupied_slots(self, pucks: list[dict]) -> list[dict]:
         """
         Scannt ALLE Pucks und:
           1. Markiert physische Belegung von ALLEN Pucks in beiden Reihen
-             (egal welche Farbe → _red_slots_occupied / _blue_slots_occupied)
-          2. Entfernt nur korrekt platzierte Pucks aus remaining (kein Pick nötig):
-             - 🔴 Rot  in roter  Reihe → remaining entfernt
-             - 🔵 Blau in blauer Reihe → remaining entfernt
+             (egal welche Farbe -> _red_slots_occupied / _blue_slots_occupied)
+          2. Entfernt nur korrekt platzierte Pucks aus remaining (kein Pick noetig):
+             - Rot  in roter  Reihe -> remaining entfernt
+             - Blau in blauer Reihe -> remaining entfernt
           3. Falschfarbige Pucks in Reihen: physisch markiert, bleiben in remaining.
 
         Muss VOR clear_blocked_red_slots() aufgerufen werden.
@@ -323,50 +331,48 @@ class PuckSortController(Node):
             is_red  = "red"  in p["label"].lower()
             is_blue = "blue" in p["label"].lower()
 
-            # ── Puck nahe roter Reihe ──────────────────────────
+            # Puck nahe roter Reihe
             if abs(p["x"] - ROW_RED_X) <= SLOT_OCCUPY_TOLERANCE:
                 distances = [abs(p["y"] - sy) for sy in red_y_slots]
                 closest   = int(np.argmin(distances))
                 if distances[closest] <= SLOT_OCCUPY_TOLERANCE:
-                    # Physisch belegt – egal welche Farbe
                     self._red_slots_occupied.add(closest)
                     if is_red:
                         self.get_logger().info(
-                            f"  ✅ 🔴 '{p['label']}' korrekt in rotem Slot {closest+1} "
-                            f"({p['x']:.3f}, {p['y']:.3f}) → kein Pick."
+                            f"  [OK] '{p['label']}' korrekt in rotem Slot {closest+1} "
+                            f"({p['x']:.3f}, {p['y']:.3f}) -> kein Pick erforderlich."
                         )
                         remaining = [x for x in remaining if x is not p]
                     else:
                         self.get_logger().info(
-                            f"  ⚠  '{p['label']}' (Fremdfarbe) in rotem Slot {closest+1} "
-                            f"({p['x']:.3f}, {p['y']:.3f}) → physisch markiert, wird geräumt."
+                            f"  [WARN] '{p['label']}' (Fremdfarbe) in rotem Slot {closest+1} "
+                            f"({p['x']:.3f}, {p['y']:.3f}) -> physisch markiert, wird geraeumt."
                         )
 
-            # ── Puck nahe blauer Reihe ─────────────────────────
+            # Puck nahe blauer Reihe
             elif abs(p["x"] - ROW_BLUE_X) <= SLOT_OCCUPY_TOLERANCE:
                 distances = [abs(p["y"] - sy) for sy in blue_y_slots]
                 closest   = int(np.argmin(distances))
                 if distances[closest] <= SLOT_OCCUPY_TOLERANCE:
-                    # Physisch belegt – egal welche Farbe
                     self._blue_slots_occupied.add(closest)
                     if is_blue:
                         self.get_logger().info(
-                            f"  ✅ 🔵 '{p['label']}' korrekt in blauem Slot {closest+1} "
-                            f"({p['x']:.3f}, {p['y']:.3f}) → kein Pick."
+                            f"  [OK] '{p['label']}' korrekt in blauem Slot {closest+1} "
+                            f"({p['x']:.3f}, {p['y']:.3f}) -> kein Pick erforderlich."
                         )
                         remaining = [x for x in remaining if x is not p]
                     else:
                         self.get_logger().info(
-                            f"  ⚠  '{p['label']}' (Fremdfarbe) in blauem Slot {closest+1} "
-                            f"({p['x']:.3f}, {p['y']:.3f}) → physisch markiert, wird sortiert."
+                            f"  [WARN] '{p['label']}' (Fremdfarbe) in blauem Slot {closest+1} "
+                            f"({p['x']:.3f}, {p['y']:.3f}) -> physisch markiert, wird sortiert."
                         )
 
         return remaining
 
     def clear_blocked_red_slots(self, pucks: list[dict]) -> list[dict]:
         """
-        Behandelt NUR: Nicht-rote Pucks in rotem Slot → in blaue Reihe räumen.
-        Nutzt physische Belegung: _next_free_slot("blue") überspringt
+        Behandelt NUR: Nicht-rote Pucks in rotem Slot -> in blaue Reihe raeumen.
+        Nutzt physische Belegung: _next_free_slot("blue") ueberspringt
         blaue Slots mit beliebiger Farbe.
         """
         red_y_slots = np.linspace(ROW_RED_Y_START, ROW_RED_Y_END, N_DROP_SLOTS)
@@ -386,51 +392,48 @@ class PuckSortController(Node):
 
             any_blocker = True
             self.get_logger().warn(
-                f"  🚧 Roter Slot {closest+1} – '{p['label']}' blockiert "
-                f"({p['x']:.3f}, {p['y']:.3f}) → räume in blaue Reihe..."
+                f"  [BLOCK] Roter Slot {closest+1} – '{p['label']}' blockiert "
+                f"({p['x']:.3f}, {p['y']:.3f}) -> raeume in blaue Reihe..."
             )
 
             if not self.pick_puck(p["x"], p["y"], p["z"]):
                 self.get_logger().error(
-                    f"  ✗ Slot {closest+1}: Blocker nicht greifbar – übersprungen"
+                    f"  [FAIL] Slot {closest+1}: Blocker nicht greifbar – uebersprungen"
                 )
                 self.open_gripper()
                 remaining = [x for x in remaining if x is not p]
                 continue
 
-            # Quell-Slot physisch freigeben
             self._red_slots_occupied.discard(closest)
             self.get_logger().info(
-                f"  🔓 Roter Slot {closest+1} physisch freigegeben."
+                f"  [FREE] Roter Slot {closest+1} physisch freigegeben."
             )
 
-            # Nächsten PHYSISCH freien blauen Slot wählen
             blue_slot      = self._next_free_slot("blue")
             drop_x, drop_y = get_drop_position("blue", blue_slot)
 
             self.get_logger().info(
-                f"  → 🔵 Blaue Reihe Slot {blue_slot+1}  "
+                f"  -> Blaue Reihe Slot {blue_slot+1}  "
                 f"Ziel: ({drop_x:.3f}, {drop_y:.3f})"
             )
 
             if not self.place_puck(drop_x, drop_y):
                 self.get_logger().error(
-                    f"  ✗ Ablage in blauem Slot {blue_slot+1} fehlgeschlagen"
+                    f"  [FAIL] Ablage in blauem Slot {blue_slot+1} fehlgeschlagen"
                 )
                 self.open_gripper()
                 remaining = [x for x in remaining if x is not p]
                 continue
 
-            # Ziel-Slot physisch belegen
             self._blue_slots_occupied.add(blue_slot)
             self.get_logger().info(
-                f"  ✓ '{p['label']}' → blaue Reihe Slot {blue_slot+1}  |  "
+                f"  [OK] '{p['label']}' -> Blaue Reihe Slot {blue_slot+1}  |  "
                 f"Roter Slot {closest+1} ist jetzt frei."
             )
             remaining = [x for x in remaining if x is not p]
 
         if not any_blocker:
-            self.get_logger().info("  ✓ Keine Blocker in roter Reihe gefunden.")
+            self.get_logger().info("  [OK] Keine Blocker in roter Reihe gefunden.")
 
         return remaining
 
@@ -445,7 +448,7 @@ class PuckSortController(Node):
 
     def move(self, x, y, z, roll, pitch, yaw) -> bool:
         self.get_logger().info(
-            f"  → ({x:.3f}, {y:.3f}, {z:.3f})  "
+            f"  -> ({x:.3f}, {y:.3f}, {z:.3f})  "
             f"rpy=({roll:.2f}, {pitch:.2f}, {yaw:.2f})"
         )
         return igus.safe_move_and_wait(
@@ -455,11 +458,11 @@ class PuckSortController(Node):
         )
 
     def open_gripper(self):
-        self.get_logger().info("  ✋ Greifer öffnen")
+        self.get_logger().info("  [GRIPPER] Oeffnen")
         self.gripper_client.set_output(30, False)
 
     def close_gripper(self):
-        self.get_logger().info("  ✊ Greifer schließen")
+        self.get_logger().info("  [GRIPPER] Schliessen")
         self.gripper_client.set_output(30, True)
 
     def spin_for(self, seconds: float):
@@ -468,7 +471,7 @@ class PuckSortController(Node):
             rclpy.spin_once(self, timeout_sec=0.05)
 
     def go_safe_home(self):
-        self.get_logger().info("  → SAFE HOME")
+        self.get_logger().info("  -> SAFE HOME")
         self.move(*SAFE_HOME, *SAFE_HOME_ORIENTATION)
 
     # ──────────────────────────────────────────────────────
@@ -477,19 +480,19 @@ class PuckSortController(Node):
 
     def scan_field(self) -> list[dict]:
         self.get_logger().info("═" * 58)
-        self.get_logger().info("  SCAN-SWEEP  (Y + Yaw)")
+        self.get_logger().info("  SCAN-SWEEP  (Y-Positionen + Yaw-Rotation)")
         self.get_logger().info(
-            f"  X={SCAN_X:.3f} const | Z={SCAN_Z:.3f} const"
+            f"  X={SCAN_X:.3f} m const | Z={SCAN_Z:.3f} m const"
         )
         self.get_logger().info(
-            f"  Y: [{FIELD_Y_MIN:.3f} → {FIELD_Y_MAX:.3f}]  "
-            f"({N_SCAN_STEPS} Pos.)"
+            f"  Y: [{FIELD_Y_MIN:.3f} -> {FIELD_Y_MAX:.3f}]  "
+            f"({N_SCAN_STEPS} Positionen)"
         )
         self.get_logger().info(
-            f"  Yaw: {YAW_SCAN_ANGLES} rad  ({DWELL_PER_YAW:.1f}s/Winkel)"
+            f"  Yaw: {YAW_SCAN_ANGLES} rad  ({DWELL_PER_YAW:.1f}s pro Winkel)"
         )
         total_t = N_SCAN_STEPS * len(YAW_SCAN_ANGLES) * DWELL_PER_YAW
-        self.get_logger().info(f"  Geschätzte Dauer: ~{total_t:.1f}s")
+        self.get_logger().info(f"  Geschaetzte Scandauer: ~{total_t:.1f}s")
         self.get_logger().info("═" * 58)
 
         self._raw_observations.clear()
@@ -501,12 +504,12 @@ class PuckSortController(Node):
 
         for y_idx, sy in enumerate(y_steps):
             self.get_logger().info(
-                f"  ── Y {y_idx+1}/{N_SCAN_STEPS}: y={sy:.3f} ──"
+                f"  ── Y-Position {y_idx+1}/{N_SCAN_STEPS}: y={sy:.3f} m ──"
             )
             ok = self.move(SCAN_X, sy, SCAN_Z, pi, 0.0, 0.0)
             if not ok:
                 self.get_logger().warn(
-                    f"  Y-Position {y_idx+1} nicht erreichbar – übersprungen"
+                    f"  [WARN] Y-Position {y_idx+1} nicht erreichbar – uebersprungen"
                 )
                 continue
 
@@ -517,13 +520,13 @@ class PuckSortController(Node):
                 ok_yaw = self.move(SCAN_X, sy, SCAN_Z, pi, 0.0, yaw)
                 if not ok_yaw:
                     self.get_logger().warn(
-                        f"    Yaw {yaw:.2f} nicht erreichbar – übersprungen"
+                        f"    [WARN] Yaw {yaw:.2f} rad nicht erreichbar – uebersprungen"
                     )
                     continue
                 self.spin_for(DWELL_PER_YAW)
 
             self.get_logger().info(
-                f"  → Rohbeobachtungen nach Y {y_idx+1}: "
+                f"  -> Rohbeobachtungen nach Y-Position {y_idx+1}: "
                 f"{len(self._raw_observations)}"
             )
 
@@ -532,22 +535,22 @@ class PuckSortController(Node):
         time.sleep(0.3)
 
         total_raw = len(self._raw_observations)
-        self.get_logger().info(f"  Sweep fertig – {total_raw} Rohbeobachtungen")
+        self.get_logger().info(f"  Sweep abgeschlossen – {total_raw} Rohbeobachtungen")
 
         if total_raw == 0:
-            self.get_logger().error("  Keine Pucks erkannt!")
+            self.get_logger().error("  [FAIL] Keine Pucks erkannt!")
             return []
 
-        pucks_raw = cluster_puck_observations(self._raw_observations, CLUSTER_RADIUS)
+        pucks_raw      = cluster_puck_observations(self._raw_observations, CLUSTER_RADIUS)
         pucks, removed = filter_valid_pucks(pucks_raw)
 
         if removed:
-            self.get_logger().warn(f"  {len(removed)} Geister-Puck(s) entfernt:")
+            self.get_logger().warn(f"  {len(removed)} Beobachtung(en) ausserhalb des Filterbereichs entfernt:")
             for p, reasons in removed:
                 self.get_logger().warn(
-                    f"    ✗ {p['label']} "
+                    f"    [WARN] {p['label']} "
                     f"({p['x']:.3f},{p['y']:.3f},{p['z']:.3f}) "
-                    f"→ {'; '.join(reasons)}"
+                    f"-> {'; '.join(reasons)}"
                 )
 
         n_red  = sum(1 for p in pucks if "red"  in p["label"].lower())
@@ -556,13 +559,13 @@ class PuckSortController(Node):
         self.get_logger().info("═" * 58)
         self.get_logger().info(
             f"  ERKANNTE PUCKS: {len(pucks)} valide  "
-            f"(🔴 {n_red} rot  |  🔵 {n_blue} blau)"
+            f"({n_red} rot  |  {n_blue} blau)"
         )
         for i, p in enumerate(pucks):
             self.get_logger().info(
                 f"  [{i+1:2d}] {p['label']:12s}  "
                 f"x={p['x']:+.3f}  y={p['y']:+.3f}  z={p['z']:+.3f}  "
-                f"[{p['n_obs']} obs]"
+                f"[{p['n_obs']} Beobachtungen]"
             )
         self.get_logger().info("═" * 58)
 
@@ -582,23 +585,23 @@ class PuckSortController(Node):
 
         if GRASP_X_OFFSET != 0.0 or GRASP_Y_OFFSET != 0.0:
             self.get_logger().info(
-                f"  Pick-Kalibrierung: ({px:.3f},{py:.3f}) → ({gx:.3f},{gy:.3f})  "
-                f"[Δx={GRASP_X_OFFSET:+.3f}, Δy={GRASP_Y_OFFSET:+.3f}]"
+                f"  Pick-Kalibrierung: ({px:.3f},{py:.3f}) -> ({gx:.3f},{gy:.3f})  "
+                f"[dx={GRASP_X_OFFSET:+.3f}, dy={GRASP_Y_OFFSET:+.3f}]"
             )
 
         self.open_gripper()
         time.sleep(0.3)
 
         if not self.move(gx, gy, approach_z, *OR):
-            self.get_logger().error("Pick: Approach nicht erreichbar")
+            self.get_logger().error("  [FAIL] Pick: Anfahrthoehe nicht erreichbar")
             return False
 
         if not self.move(gx, gy, grasp_z, *OR):
-            self.get_logger().error("Pick: Greifposition nicht erreichbar")
+            self.get_logger().error("  [FAIL] Pick: Greifposition nicht erreichbar")
             return False
 
         self.get_logger().info(
-            f"  ⏳ Warte {GRASP_SETTLE_WAIT:.1f}s – Arm-Nachschwingen abklingen..."
+            f"  [WAIT] {GRASP_SETTLE_WAIT:.1f}s – Nachschwingen des Arms abklingen lassen..."
         )
         time.sleep(GRASP_SETTLE_WAIT)
 
@@ -606,7 +609,7 @@ class PuckSortController(Node):
         time.sleep(0.6)
 
         if not self.move(gx, gy, LIFT_Z, *OR):
-            self.get_logger().error("Pick: Anheben fehlgeschlagen")
+            self.get_logger().error("  [FAIL] Pick: Anheben fehlgeschlagen")
             return False
 
         return True
@@ -618,31 +621,30 @@ class PuckSortController(Node):
     def place_puck(self, drop_x: float, drop_y: float) -> bool:
         OR         = (pi, 0.00, 0.00)
         approach_z = BOARD_Z + APPROACH_OFFSET
-        place_z    = BOARD_Z + DROP_OFFSET      # ← war: BOARD_Z + GRASP_OFFSET
+        place_z    = BOARD_Z + DROP_OFFSET
 
         if PLACE_X_OFFSET != 0.0 or PLACE_Y_OFFSET != 0.0:
             self.get_logger().info(
                 f"  Place-Kalibrierung:  "
-                f"[Δx={PLACE_X_OFFSET:+.3f}, Δy={PLACE_Y_OFFSET:+.3f}]"
+                f"[dx={PLACE_X_OFFSET:+.3f}, dy={PLACE_Y_OFFSET:+.3f}]"
             )
 
         if not self.move(drop_x, drop_y, approach_z, *OR):
-            self.get_logger().error("Place: Anfahrt fehlgeschlagen")
+            self.get_logger().error("  [FAIL] Place: Anfahrt fehlgeschlagen")
             return False
 
         if not self.move(drop_x, drop_y, place_z, *OR):
-            self.get_logger().error("Place: Absenken fehlgeschlagen")
+            self.get_logger().error("  [FAIL] Place: Absenken fehlgeschlagen")
             return False
 
         self.open_gripper()
         time.sleep(0.4)
 
         if not self.move(drop_x, drop_y, LIFT_Z, *OR):
-            self.get_logger().error("Place: Abheben fehlgeschlagen")
+            self.get_logger().error("  [FAIL] Place: Abheben fehlgeschlagen")
             return False
 
         return True
-
 
     # ──────────────────────────────────────────────────────
     # Sort-Sequenz
@@ -652,23 +654,23 @@ class PuckSortController(Node):
         label      = puck["label"].lower()
         px, py, pz = puck["x"], puck["y"], puck["z"]
         is_red     = "red" in label
-        icon       = "🔴" if is_red else "🔵"
-        color      = "red" if is_red else "blue"
+        color_tag  = "[ROT] " if is_red else "[BLAU]"
+        color      = "red"   if is_red else "blue"
 
         slot_idx       = self._next_free_slot(color)
-        row_name       = "Reihe 1 – ROT  (x≈0.39)" if is_red else "Reihe 3 – BLAU (x≈0.29)"
+        row_name       = "Reihe 1 – ROT  (x~0.39)" if is_red else "Reihe 3 – BLAU (x~0.29)"
         drop_x, drop_y = get_drop_position(color, slot_idx)
 
         self.get_logger().info(
-            f"  {icon} '{puck['label']}'  ({px:.3f}, {py:.3f}, {pz:.3f})"
+            f"  {color_tag} '{puck['label']}'  ({px:.3f}, {py:.3f}, {pz:.3f})"
         )
         self.get_logger().info(
-            f"  → {row_name}  Slot {slot_idx+1}/{N_DROP_SLOTS}  "
-            f"Ziel: ({drop_x:.3f}, {drop_y:.3f}, z≈{BOARD_Z+GRASP_OFFSET:.3f})"
+            f"  -> {row_name}  Slot {slot_idx+1}/{N_DROP_SLOTS}  "
+            f"Ziel: ({drop_x:.3f}, {drop_y:.3f}, z~{BOARD_Z+GRASP_OFFSET:.3f})"
         )
 
         if not self.pick_puck(px, py, pz):
-            self.get_logger().error("  ✗ Greifen fehlgeschlagen")
+            self.get_logger().error("  [FAIL] Greifen fehlgeschlagen")
             self.open_gripper()
             return False
 
@@ -676,7 +678,7 @@ class PuckSortController(Node):
         self._release_physical_slot(px, py)
 
         if not self.place_puck(drop_x, drop_y):
-            self.get_logger().error("  ✗ Ablegen fehlgeschlagen")
+            self.get_logger().error("  [FAIL] Ablegen fehlgeschlagen")
             self.open_gripper()
             return False
 
@@ -699,40 +701,39 @@ class PuckSortController(Node):
         self.get_logger().info("╚════════════════════════════════════════════╝")
         self.get_logger().info(
             f"  Brett-Z: {BOARD_Z:.3f} m  |  "
-            f"Pick/Place-Höhe: {BOARD_Z+GRASP_OFFSET:.3f} m"
+            f"Pick/Place-Hoehe: {BOARD_Z+GRASP_OFFSET:.3f} m"
         )
         self.get_logger().info(
             f"  Transport: LIFT_Z={LIFT_Z:.3f} m  |  "
-            f"Anfahrt: APPROACH={APPROACH_OFFSET:.3f} m"
+            f"Anfahrt: APPROACH_OFFSET={APPROACH_OFFSET:.3f} m"
         )
         self.get_logger().info(
-            f"  🔴 Reihe 1 (ROT):  x={ROW_RED_X:.3f}  "
+            f"  [ROT]  Reihe 1: x={ROW_RED_X:.3f}  "
             f"y=[{ROW_RED_Y_START:.3f}..{ROW_RED_Y_END:.3f}]"
         )
-        self.get_logger().info(f"  ○  Reihe 2 (frei): x={ROW_MID_X:.3f}")
+        self.get_logger().info(f"  (frei) Reihe 2: x={ROW_MID_X:.3f}")
         self.get_logger().info(
-            f"  🔵 Reihe 3 (BLAU): x={ROW_BLUE_X:.3f}  "
+            f"  [BLAU] Reihe 3: x={ROW_BLUE_X:.3f}  "
             f"y=[{ROW_BLUE_Y_START:.3f}..{ROW_BLUE_Y_END:.3f}]"
         )
         self.get_logger().info(
-            f"  Slot-Toleranz: ±{SLOT_OCCUPY_TOLERANCE:.3f} m  |  "
-            f"Place-Offset: Δx={PLACE_X_OFFSET:+.3f}  Δy={PLACE_Y_OFFSET:+.3f}"
+            f"  Slot-Toleranz: +-{SLOT_OCCUPY_TOLERANCE:.3f} m  |  "
+            f"Place-Offset: dx={PLACE_X_OFFSET:+.3f}  dy={PLACE_Y_OFFSET:+.3f}"
         )
 
         self.open_gripper()
         time.sleep(0.3)
         self.go_safe_home()
 
-        # 1. Feld scannen
+        # 1. Feld scannen (Y-Sweep + Yaw)
         pucks = self.scan_field()
 
         if not pucks:
-            self.get_logger().warn("Keine validen Pucks – zurück zu Safe Home.")
+            self.get_logger().warn("  [WARN] Keine validen Pucks erkannt – zurueck zu Safe Home.")
             self.go_safe_home()
             return
 
         # 2. Physische Belegung BEIDER Reihen vormarkieren
-        #    (erfasst alle Pucks in Reihen, unabhängig von Farbe)
         self.get_logger().info("── Slot-Check: Physische Vormarkierung (beide Reihen) ─")
         pucks = self._detect_occupied_slots(pucks)
         self.get_logger().info(
@@ -742,8 +743,8 @@ class PuckSortController(Node):
             f"  Blaue Slots physisch belegt:  {sorted(self._blue_slots_occupied)}"
         )
 
-        # 3. Blaue Blocker in roter Reihe räumen
-        self.get_logger().info("── Slot-Check: Blaue Blocker in roter Reihe ─")
+        # 3. Falschfarbige Pucks in roter Reihe in blaue Reihe raeumen
+        self.get_logger().info("── Slot-Check: Blocker in roter Reihe ─")
         pucks = self.clear_blocked_red_slots(pucks)
         self.get_logger().info(
             f"  Rote  Slots nach Freigabe: {sorted(self._red_slots_occupied)}"
@@ -752,7 +753,7 @@ class PuckSortController(Node):
             f"  Blaue Slots nach Freigabe: {sorted(self._blue_slots_occupied)}"
         )
 
-        # 4. Sortierreihenfolge: Rot zuerst, dann Blau; je y aufsteigend
+        # 4. Sortierreihenfolge: Rot zuerst, dann Blau; je y-Koordinate aufsteigend
         pucks_sorted = sorted(
             pucks,
             key=lambda p: (
@@ -762,11 +763,11 @@ class PuckSortController(Node):
         )
 
         self.get_logger().info(
-            f"Reihenfolge: {len(pucks_sorted)} Pucks  "
-            f"(🔴 zuerst → 🔵, je y aufsteigend)"
+            f"  Sortierreihenfolge: {len(pucks_sorted)} Pucks  "
+            f"(ROT zuerst, dann BLAU; je y aufsteigend)"
         )
 
-        # 5. Pick & Sort
+        # 5. Pick & Sort – alle erkannten Pucks abarbeiten
         success_count = 0
         fail_count    = 0
 
@@ -776,19 +777,19 @@ class PuckSortController(Node):
             )
             if self.sort_puck(puck):
                 success_count += 1
-                self.get_logger().info(f"  ✓ Puck {i+1} sortiert.")
+                self.get_logger().info(f"  [OK]   Puck {i+1} erfolgreich sortiert.")
             else:
                 fail_count += 1
-                self.get_logger().warn(f"  ✗ Puck {i+1} fehlgeschlagen.")
+                self.get_logger().warn(f"  [FAIL] Puck {i+1} fehlgeschlagen.")
 
         self.get_logger().info("═" * 58)
         self.get_logger().info(
-            f"  FERTIG  ✓ {success_count}/{len(pucks_sorted)}  "
-            f"✗ {fail_count}/{len(pucks_sorted)}"
+            f"  ABGESCHLOSSEN  OK: {success_count}/{len(pucks_sorted)}  "
+            f"FAIL: {fail_count}/{len(pucks_sorted)}"
         )
         self.get_logger().info(
-            f"  Physisch belegt: 🔴 {len(self._red_slots_occupied)} Slots  "
-            f"|  🔵 {len(self._blue_slots_occupied)} Slots"
+            f"  Physisch belegt: ROT={len(self._red_slots_occupied)} Slots  "
+            f"|  BLAU={len(self._blue_slots_occupied)} Slots"
         )
         self.get_logger().info("═" * 58)
 
@@ -813,7 +814,7 @@ def main():
         _node = PuckSortController()
         _node.run()
     except KeyboardInterrupt:
-        print("\n[INFO] Gestoppt durch Ctrl+C")
+        print("\n[INFO] Programm durch Benutzer gestoppt (Ctrl+C)")
     except Exception as e:
         print(f"\n[ERROR] {e}")
         import traceback
