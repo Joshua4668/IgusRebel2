@@ -94,12 +94,12 @@ GRASP_OFFSET    = -0.005  # [m]  ← Greifhöhe (Pick)
 DROP_OFFSET     = 0.00  # [m]  ← Ablagehöhe (Place) – separat einstellbar
 
 # ── Greif-Kalibrierung (Pick) ────────────────────────────────
-GRASP_X_OFFSET = 0.0
+GRASP_X_OFFSET = 0.005
 GRASP_Y_OFFSET = 0.01
 
 # ── Ablage-Kalibrierung (Place) ──────────────────────────────
 PLACE_X_OFFSET = 0.00
-PLACE_Y_OFFSET = 0.00
+PLACE_Y_OFFSET = -0.005
 
 # ── Wartezeiten ─────────────────────────────────────────────
 GRASP_SETTLE_WAIT = 3.0   # [s]
