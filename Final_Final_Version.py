@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-IGUS Rebel – Puck Pick & Sort  v3.2.1
+IGUS Rebel – Puck Pick & Sort  v3.3.0
 =====================================
-Neu gegenueber v3.2:
-  - Physische Slot-Belegung statt farb-basierter:
-    _red_slots_occupied / _blue_slots_occupied erfassen JEDEN Puck im Slot,
-    unabhaengig von Farbe -> kein Stapeln mehr moeglich
-  - _detect_occupied_slots() markiert auch falschfarbige Pucks in Reihen physisch
-  - _release_physical_slot() gibt Quell-Slot nach erfolgreichem Pick frei
-  - _next_free_slot() prueft ausschliesslich physische Belegung
+Neu gegenueber v3.2.3:
+  - Feste Greif- und Ablaghoehe: FIXED_GRASP_Z und FIXED_PLACE_Z
+    ersetzen alle puck-z-abhaengigen Berechnungen.
+  - pick_puck() ignoriert pz komplett -> nutzt nur FIXED_GRASP_Z
+  - place_puck() nutzt FIXED_PLACE_Z (unveraendert = BOARD_Z + DROP_OFFSET)
+  - Scan erfasst z-Werte weiterhin fuer Filterung, ignoriert sie aber beim Greifen
 """
+
 
 import time
 import rclpy
@@ -25,31 +25,40 @@ from igus_student_msgs.msg import Puck3DArray
 from igus_student import imports as igus
 
 
+
 # ═══════════════════════════════════════════════════════════
 #  KONFIGURATION
 # ═══════════════════════════════════════════════════════════
+
 
 # ── Safe Home ───────────────────────────────────────────────
 SAFE_HOME             = (0.19,  0.00,  0.23)
 SAFE_HOME_ORIENTATION = (pi, 0.00, 0.00)
 
+
+# ── Greifer-Ausrichtungskorrektur ───────────────────────────
+GRIPPER_YAW_OFFSET = -pi / 2   # [rad]  +pi/2 = +90°  |  -pi/2 = -90°
+
+
 # ── Scan-Geometrie ──────────────────────────────────────────
-SCAN_X           = 0.25
-SCAN_Z           = 0.16
-SCAN_ORIENTATION = (pi, 0.00, 0.00)
+SCAN_X = 0.25
+SCAN_Z = 0.16
+
 
 # ── Y-Sweep ─────────────────────────────────────────────────
 FIELD_Y_MIN  = -0.11
 FIELD_Y_MAX  =  0.05
 N_SCAN_STEPS =  8
 
-# ── Yaw-Rotation am Scanpunkt ───────────────────────────────
-YAW_SCAN_ANGLES = [-0.1, 0.0, 0.1]   # [rad]
-DWELL_PER_YAW   = 0.2                 # [s]
+
+# ── Wartezeit pro Scanposition ───────────────────────────────
+DWELL_PER_SCAN = 0.6   # [s]
+
 
 # ── Scan-Parameter ──────────────────────────────────────────
 MIN_OBSERVATIONS = 4
 CLUSTER_RADIUS   = 0.025   # [m]
+
 
 # ── Filterbereich ───────────────────────────────────────────
 FILTER_X_MIN = 0.20
@@ -57,21 +66,25 @@ FILTER_X_MAX = 0.43
 FILTER_Y_MIN = -0.17
 FILTER_Y_MAX =  0.17
 FILTER_Z_MIN = -0.01
-FILTER_Z_MAX =  0.03
+FILTER_Z_MAX =  0.05
 
-# ── Brett-Oberflaeche ────────────────────────────────────────
-BOARD_Z = 0.010   # [m]
+
+# ══════════════════════════════════════════════════════════
+#  FESTE GREIF- UND ABLAGEHOEHE  <-- hier einmalig einstellen
+# ══════════════════════════════════════════════════════════
+#
+#  FIXED_GRASP_Z   Absolute Z-Hoehe in Metern, auf die der Arm
+#                  beim Greifen absenkt. Gilt fuer ALLE Pucks.
+#                  Messen: Arm manuell auf Puck absenken, Z ablesen.
+#
+#  FIXED_PLACE_Z   Absolute Z-Hoehe beim Ablegen.
+#                  Meist = BOARD_Z, kann aber feinjustiert werden.
+#
+FIXED_GRASP_Z = 0.021   # [m]  <-- anpassen bis Greifer sicher fasst
+FIXED_PLACE_Z = 0.023   # [m]  <-- anpassen bis Puck sicher abgelegt wird
+
 
 # ── Ablage-Reihen ────────────────────────────────────────────
-#
-#        Y: ROW_Y_START ─────────────── ROW_Y_END
-#        +────────────────────────────────────────+  x ~ 0.39
-#        |  o  o  o  o  o  o  o  o  o  o         |  <- ROT   (Reihe 1)
-#        |  o  o  o  o  o  o  o  o  o  o         |  <- (frei)(Reihe 2)
-#        |  o  o  o  o  o  o  o  o  o  o         |  <- BLAU  (Reihe 3)
-#        +────────────────────────────────────────+  x ~ 0.29
-#              Slot 1 ─────────────────── Slot 10
-#
 N_DROP_SLOTS = 10
 
 ROW_RED_X       = 0.39
@@ -84,37 +97,38 @@ ROW_BLUE_X       = 0.29
 ROW_BLUE_Y_START = -0.14
 ROW_BLUE_Y_END   =  0.14
 
+
 # ── Slot-Belegungserkennung ──────────────────────────────────
 SLOT_OCCUPY_TOLERANCE = 0.03   # [m]
 
+
 # ── Geometrie-Offsets ───────────────────────────────────────
-LIFT_Z          = 0.07    # [m]
-APPROACH_OFFSET = 0.06    # [m]
-GRASP_OFFSET    = -0.005  # [m]  Greifhoehe (Pick), relativ zu pz
-DROP_OFFSET     =  0.00   # [m]  Ablagehoehe (Place), relativ zu BOARD_Z
+LIFT_Z          = 0.07   # [m]  Transporthöhe nach Pick/Place
+APPROACH_OFFSET = 0.06   # [m]  Anfahrt oberhalb Greif-/Ablagehoehe
+
 
 # ── Greif-Kalibrierung (Pick) ────────────────────────────────
-GRASP_X_OFFSET = 0.005
-GRASP_Y_OFFSET = 0.01
+GRASP_X_OFFSET = 0.002
+GRASP_Y_OFFSET = 0.00
+
 
 # ── Ablage-Kalibrierung (Place) ──────────────────────────────
-PLACE_X_OFFSET =  0.00
-PLACE_Y_OFFSET = -0.005
+PLACE_X_OFFSET =  0.01
+PLACE_Y_OFFSET = -0.003
+
 
 # ── Wartezeiten ─────────────────────────────────────────────
 GRASP_SETTLE_WAIT = 3.0   # [s]
 SETTLE_TIME       = 0.2   # [s]
 
 
+
 # ═══════════════════════════════════════════════════════════
 #  SLOT-BERECHNUNG
 # ═══════════════════════════════════════════════════════════
 
+
 def get_drop_position(color: str, slot_index: int) -> tuple[float, float]:
-    """
-    Gibt (x, y) fuer den n-ten Slot inkl. PLACE_X/Y_OFFSET zurueck.
-    slot_index: 0-basiert. Wenn alle Slots voll -> letzter Slot wiederholt.
-    """
     if color == "red":
         x       = ROW_RED_X
         y_slots = np.linspace(ROW_RED_Y_START, ROW_RED_Y_END, N_DROP_SLOTS)
@@ -126,15 +140,13 @@ def get_drop_position(color: str, slot_index: int) -> tuple[float, float]:
     return (x + PLACE_X_OFFSET, float(y_slots[idx]) + PLACE_Y_OFFSET)
 
 
+
 # ═══════════════════════════════════════════════════════════
 #  FILTER & CLUSTERING
 # ═══════════════════════════════════════════════════════════
 
+
 def filter_valid_pucks(pucks: list[dict]):
-    """
-    Filtert Pucks ausserhalb des definierten Arbeitsbereichs heraus.
-    Gibt (valide, entfernte) zurueck.
-    """
     valid, removed = [], []
     for p in pucks:
         reasons = []
@@ -152,11 +164,6 @@ def filter_valid_pucks(pucks: list[dict]):
 
 
 def cluster_puck_observations(raw: list[dict], radius: float) -> list[dict]:
-    """
-    Fasst mehrere Kamera-Beobachtungen desselben Pucks zu einem Eintrag zusammen.
-    Beobachtungen innerhalb von 'radius' Metern werden zu einem Cluster vereint.
-    Cluster mit weniger als MIN_OBSERVATIONS Messungen werden verworfen.
-    """
     if not raw:
         return []
     used  = [False] * len(raw)
@@ -192,9 +199,11 @@ def cluster_puck_observations(raw: list[dict], radius: float) -> list[dict]:
     return pucks
 
 
+
 # ═══════════════════════════════════════════════════════════
 #  HAUPT-NODE
 # ═══════════════════════════════════════════════════════════
+
 
 class PuckSortController(Node):
 
@@ -224,9 +233,6 @@ class PuckSortController(Node):
             callback_group=self.callback_group
         )
 
-        # Physische Slot-Belegung: erfasst JEDEN Puck im Slot, egal welche Farbe.
-        # _next_free_slot() prueft ausschliesslich diese Sets ->
-        # verhindert Stapeln beim Umraeumen und Sortieren.
         self._red_slots_occupied:  set[int] = set()
         self._blue_slots_occupied: set[int] = set()
 
@@ -243,6 +249,7 @@ class PuckSortController(Node):
         self.get_logger().info(
             f"Planungsszene: {len(igus.COLLISION_OBJECTS)} Kollisionsobjekte geladen."
         )
+
 
     # ──────────────────────────────────────────────────────
     # Callbacks
@@ -264,16 +271,55 @@ class PuckSortController(Node):
                 "z": float(p.z),
             })
 
+
+    # ──────────────────────────────────────────────────────
+    # Bewegungs-Hilfsmethoden
+    # ──────────────────────────────────────────────────────
+
+    def is_moving(self) -> bool:
+        return igus.is_moving_from_velocities(
+            self.joint_velocities, igus.VELOCITY_THRESHOLD
+        )
+
+    def move(self, x, y, z, roll, pitch, yaw) -> bool:
+        """Rohe Bewegungsmethode – uebergibt yaw unveraendert."""
+        self.get_logger().info(
+            f"  -> ({x:.3f}, {y:.3f}, {z:.3f})  "
+            f"rpy=({roll:.2f}, {pitch:.2f}, {yaw:.2f})"
+        )
+        return igus.safe_move_and_wait(
+            self, x, y, z, roll, pitch, yaw,
+            action_client=self.move_client,
+            settle_time=SETTLE_TIME
+        )
+
+    def move_g(self, x, y, z, roll, pitch, yaw) -> bool:
+        """Greifer-Bewegung: addiert GRIPPER_YAW_OFFSET auf yaw."""
+        return self.move(x, y, z, roll, pitch, yaw + GRIPPER_YAW_OFFSET)
+
+    def open_gripper(self):
+        self.get_logger().info("  [GRIPPER] Oeffnen")
+        self.gripper_client.set_output(30, False)
+
+    def close_gripper(self):
+        self.get_logger().info("  [GRIPPER] Schliessen")
+        self.gripper_client.set_output(30, True)
+
+    def spin_for(self, seconds: float):
+        t_end = time.time() + seconds
+        while time.time() < t_end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def go_safe_home(self):
+        self.get_logger().info("  -> SAFE HOME")
+        self.move_g(*SAFE_HOME, *SAFE_HOME_ORIENTATION)
+
+
     # ──────────────────────────────────────────────────────
     # Slot-Hilfsmethoden
     # ──────────────────────────────────────────────────────
 
     def _next_free_slot(self, color: str) -> int:
-        """
-        Gibt den naechsten physisch freien Slot-Index zurueck.
-        Prueft _red_slots_occupied / _blue_slots_occupied ->
-        egal ob roter oder blauer Puck drin liegt, der Slot wird uebersprungen.
-        """
         occupied = self._red_slots_occupied if color == "red" else self._blue_slots_occupied
         for i in range(N_DROP_SLOTS):
             if i not in occupied:
@@ -284,12 +330,6 @@ class PuckSortController(Node):
         return 0
 
     def _release_physical_slot(self, px: float, py: float):
-        """
-        Wird nach einem erfolgreichen Pick aufgerufen.
-        Erkennt anhand der Scan-Position (px, py), in welchem Slot der Puck lag,
-        und entfernt diesen aus dem physischen Belegungs-Set.
-        Pucks die nicht in einer Reihe lagen -> kein Eintrag vorhanden, kein Effekt.
-        """
         red_y_slots  = np.linspace(ROW_RED_Y_START,  ROW_RED_Y_END,  N_DROP_SLOTS)
         blue_y_slots = np.linspace(ROW_BLUE_Y_START, ROW_BLUE_Y_END, N_DROP_SLOTS)
 
@@ -301,7 +341,6 @@ class PuckSortController(Node):
                 self.get_logger().info(
                     f"  [FREE] Roter Slot {closest+1} physisch freigegeben."
                 )
-
         elif abs(px - ROW_BLUE_X) <= SLOT_OCCUPY_TOLERANCE:
             dists   = [abs(py - sy) for sy in blue_y_slots]
             closest = int(np.argmin(dists))
@@ -312,17 +351,6 @@ class PuckSortController(Node):
                 )
 
     def _detect_occupied_slots(self, pucks: list[dict]) -> list[dict]:
-        """
-        Scannt ALLE Pucks und:
-          1. Markiert physische Belegung von ALLEN Pucks in beiden Reihen
-             (egal welche Farbe -> _red_slots_occupied / _blue_slots_occupied)
-          2. Entfernt nur korrekt platzierte Pucks aus remaining (kein Pick noetig):
-             - Rot  in roter  Reihe -> remaining entfernt
-             - Blau in blauer Reihe -> remaining entfernt
-          3. Falschfarbige Pucks in Reihen: physisch markiert, bleiben in remaining.
-
-        Muss VOR clear_blocked_red_slots() aufgerufen werden.
-        """
         red_y_slots  = np.linspace(ROW_RED_Y_START,  ROW_RED_Y_END,  N_DROP_SLOTS)
         blue_y_slots = np.linspace(ROW_BLUE_Y_START, ROW_BLUE_Y_END, N_DROP_SLOTS)
         remaining    = list(pucks)
@@ -331,7 +359,6 @@ class PuckSortController(Node):
             is_red  = "red"  in p["label"].lower()
             is_blue = "blue" in p["label"].lower()
 
-            # Puck nahe roter Reihe
             if abs(p["x"] - ROW_RED_X) <= SLOT_OCCUPY_TOLERANCE:
                 distances = [abs(p["y"] - sy) for sy in red_y_slots]
                 closest   = int(np.argmin(distances))
@@ -349,7 +376,6 @@ class PuckSortController(Node):
                             f"({p['x']:.3f}, {p['y']:.3f}) -> physisch markiert, wird geraeumt."
                         )
 
-            # Puck nahe blauer Reihe
             elif abs(p["x"] - ROW_BLUE_X) <= SLOT_OCCUPY_TOLERANCE:
                 distances = [abs(p["y"] - sy) for sy in blue_y_slots]
                 closest   = int(np.argmin(distances))
@@ -370,11 +396,6 @@ class PuckSortController(Node):
         return remaining
 
     def clear_blocked_red_slots(self, pucks: list[dict]) -> list[dict]:
-        """
-        Behandelt NUR: Nicht-rote Pucks in rotem Slot -> in blaue Reihe raeumen.
-        Nutzt physische Belegung: _next_free_slot("blue") ueberspringt
-        blaue Slots mit beliebiger Farbe.
-        """
         red_y_slots = np.linspace(ROW_RED_Y_START, ROW_RED_Y_END, N_DROP_SLOTS)
         remaining   = list(pucks)
         any_blocker = False
@@ -396,7 +417,7 @@ class PuckSortController(Node):
                 f"({p['x']:.3f}, {p['y']:.3f}) -> raeume in blaue Reihe..."
             )
 
-            if not self.pick_puck(p["x"], p["y"], p["z"]):
+            if not self.pick_puck(p["x"], p["y"]):
                 self.get_logger().error(
                     f"  [FAIL] Slot {closest+1}: Blocker nicht greifbar – uebersprungen"
                 )
@@ -437,42 +458,6 @@ class PuckSortController(Node):
 
         return remaining
 
-    # ──────────────────────────────────────────────────────
-    # Bewegungs-Hilfsmethoden
-    # ──────────────────────────────────────────────────────
-
-    def is_moving(self) -> bool:
-        return igus.is_moving_from_velocities(
-            self.joint_velocities, igus.VELOCITY_THRESHOLD
-        )
-
-    def move(self, x, y, z, roll, pitch, yaw) -> bool:
-        self.get_logger().info(
-            f"  -> ({x:.3f}, {y:.3f}, {z:.3f})  "
-            f"rpy=({roll:.2f}, {pitch:.2f}, {yaw:.2f})"
-        )
-        return igus.safe_move_and_wait(
-            self, x, y, z, roll, pitch, yaw,
-            action_client=self.move_client,
-            settle_time=SETTLE_TIME
-        )
-
-    def open_gripper(self):
-        self.get_logger().info("  [GRIPPER] Oeffnen")
-        self.gripper_client.set_output(30, False)
-
-    def close_gripper(self):
-        self.get_logger().info("  [GRIPPER] Schliessen")
-        self.gripper_client.set_output(30, True)
-
-    def spin_for(self, seconds: float):
-        t_end = time.time() + seconds
-        while time.time() < t_end:
-            rclpy.spin_once(self, timeout_sec=0.05)
-
-    def go_safe_home(self):
-        self.get_logger().info("  -> SAFE HOME")
-        self.move(*SAFE_HOME, *SAFE_HOME_ORIENTATION)
 
     # ──────────────────────────────────────────────────────
     # Scan-Sweep
@@ -480,7 +465,7 @@ class PuckSortController(Node):
 
     def scan_field(self) -> list[dict]:
         self.get_logger().info("═" * 58)
-        self.get_logger().info("  SCAN-SWEEP  (Y-Positionen + Yaw-Rotation)")
+        self.get_logger().info("  SCAN-SWEEP  (Y-Positionen)")
         self.get_logger().info(
             f"  X={SCAN_X:.3f} m const | Z={SCAN_Z:.3f} m const"
         )
@@ -489,9 +474,14 @@ class PuckSortController(Node):
             f"({N_SCAN_STEPS} Positionen)"
         )
         self.get_logger().info(
-            f"  Yaw: {YAW_SCAN_ANGLES} rad  ({DWELL_PER_YAW:.1f}s pro Winkel)"
+            f"  Wartezeit pro Position: {DWELL_PER_SCAN:.1f}s  |  "
+            f"Greifer-Yaw-Offset: {GRIPPER_YAW_OFFSET:.4f} rad"
         )
-        total_t = N_SCAN_STEPS * len(YAW_SCAN_ANGLES) * DWELL_PER_YAW
+        self.get_logger().info(
+            f"  Feste Greifhoehe: FIXED_GRASP_Z={FIXED_GRASP_Z:.3f} m  |  "
+            f"Feste Ablagehoehe: FIXED_PLACE_Z={FIXED_PLACE_Z:.3f} m"
+        )
+        total_t = N_SCAN_STEPS * DWELL_PER_SCAN
         self.get_logger().info(f"  Geschaetzte Scandauer: ~{total_t:.1f}s")
         self.get_logger().info("═" * 58)
 
@@ -506,24 +496,14 @@ class PuckSortController(Node):
             self.get_logger().info(
                 f"  ── Y-Position {y_idx+1}/{N_SCAN_STEPS}: y={sy:.3f} m ──"
             )
-            ok = self.move(SCAN_X, sy, SCAN_Z, pi, 0.0, 0.0)
+            ok = self.move_g(SCAN_X, sy, SCAN_Z, pi, 0.0, 0.0)
             if not ok:
                 self.get_logger().warn(
                     f"  [WARN] Y-Position {y_idx+1} nicht erreichbar – uebersprungen"
                 )
                 continue
 
-            for yaw_idx, yaw in enumerate(YAW_SCAN_ANGLES):
-                self.get_logger().info(
-                    f"    Yaw {yaw_idx+1}/{len(YAW_SCAN_ANGLES)}: {yaw:+.2f} rad"
-                )
-                ok_yaw = self.move(SCAN_X, sy, SCAN_Z, pi, 0.0, yaw)
-                if not ok_yaw:
-                    self.get_logger().warn(
-                        f"    [WARN] Yaw {yaw:.2f} rad nicht erreichbar – uebersprungen"
-                    )
-                    continue
-                self.spin_for(DWELL_PER_YAW)
+            self.spin_for(DWELL_PER_SCAN)
 
             self.get_logger().info(
                 f"  -> Rohbeobachtungen nach Y-Position {y_idx+1}: "
@@ -545,7 +525,9 @@ class PuckSortController(Node):
         pucks, removed = filter_valid_pucks(pucks_raw)
 
         if removed:
-            self.get_logger().warn(f"  {len(removed)} Beobachtung(en) ausserhalb des Filterbereichs entfernt:")
+            self.get_logger().warn(
+                f"  {len(removed)} Beobachtung(en) ausserhalb des Filterbereichs entfernt:"
+            )
             for p, reasons in removed:
                 self.get_logger().warn(
                     f"    [WARN] {p['label']} "
@@ -564,87 +546,96 @@ class PuckSortController(Node):
         for i, p in enumerate(pucks):
             self.get_logger().info(
                 f"  [{i+1:2d}] {p['label']:12s}  "
-                f"x={p['x']:+.3f}  y={p['y']:+.3f}  z={p['z']:+.3f}  "
-                f"[{p['n_obs']} Beobachtungen]"
+                f"x={p['x']:+.3f}  y={p['y']:+.3f}  "
+                f"z={p['z']:+.3f} (ignoriert)  [{p['n_obs']} Beob.]"
             )
         self.get_logger().info("═" * 58)
 
         return pucks
 
+
     # ──────────────────────────────────────────────────────
-    # Pick-Sequenz
+    # Pick-Sequenz  (pz wird ignoriert -> FIXED_GRASP_Z)
     # ──────────────────────────────────────────────────────
 
-    def pick_puck(self, px: float, py: float, pz: float) -> bool:
-        OR         = (pi, 0.00, 0.00)
-        approach_z = pz + APPROACH_OFFSET
-        grasp_z    = pz + GRASP_OFFSET
+    def pick_puck(self, px: float, py: float) -> bool:
+        """
+        Greift einen Puck an (px, py).
+        Z-Koordinate des Scans wird komplett ignoriert.
+        Verwendet ausschliesslich FIXED_GRASP_Z als Greifhoehe.
+        """
+        approach_z = FIXED_GRASP_Z + APPROACH_OFFSET
+        grasp_z    = FIXED_GRASP_Z
 
         gx = px + GRASP_X_OFFSET
         gy = py + GRASP_Y_OFFSET
 
-        if GRASP_X_OFFSET != 0.0 or GRASP_Y_OFFSET != 0.0:
-            self.get_logger().info(
-                f"  Pick-Kalibrierung: ({px:.3f},{py:.3f}) -> ({gx:.3f},{gy:.3f})  "
-                f"[dx={GRASP_X_OFFSET:+.3f}, dy={GRASP_Y_OFFSET:+.3f}]"
-            )
+        self.get_logger().info(
+            f"  Pick: ({px:.3f},{py:.3f}) -> ({gx:.3f},{gy:.3f})  "
+            f"Greifhoehe: {grasp_z:.3f} m (fest)  "
+            f"[dx={GRASP_X_OFFSET:+.3f}, dy={GRASP_Y_OFFSET:+.3f}]"
+        )
 
         self.open_gripper()
         time.sleep(0.3)
 
-        if not self.move(gx, gy, approach_z, *OR):
+        if not self.move_g(gx, gy, approach_z, pi, 0.0, 0.0):
             self.get_logger().error("  [FAIL] Pick: Anfahrthoehe nicht erreichbar")
             return False
 
-        if not self.move(gx, gy, grasp_z, *OR):
+        if not self.move_g(gx, gy, grasp_z, pi, 0.0, 0.0):
             self.get_logger().error("  [FAIL] Pick: Greifposition nicht erreichbar")
             return False
 
         self.get_logger().info(
-            f"  [WAIT] {GRASP_SETTLE_WAIT:.1f}s – Nachschwingen des Arms abklingen lassen..."
+            f"  [WAIT] {GRASP_SETTLE_WAIT:.1f}s – Nachschwingen abklingen lassen..."
         )
         time.sleep(GRASP_SETTLE_WAIT)
 
         self.close_gripper()
         time.sleep(0.6)
 
-        if not self.move(gx, gy, LIFT_Z, *OR):
+        if not self.move_g(gx, gy, LIFT_Z, pi, 0.0, 0.0):
             self.get_logger().error("  [FAIL] Pick: Anheben fehlgeschlagen")
             return False
 
         return True
 
+
     # ──────────────────────────────────────────────────────
-    # Place-Sequenz
+    # Place-Sequenz  (verwendet FIXED_PLACE_Z)
     # ──────────────────────────────────────────────────────
 
     def place_puck(self, drop_x: float, drop_y: float) -> bool:
-        OR         = (pi, 0.00, 0.00)
-        approach_z = BOARD_Z + APPROACH_OFFSET
-        place_z    = BOARD_Z + DROP_OFFSET
+        """
+        Legt einen Puck ab.
+        Verwendet ausschliesslich FIXED_PLACE_Z als Ablagehoehe.
+        """
+        approach_z = FIXED_PLACE_Z + APPROACH_OFFSET
+        place_z    = FIXED_PLACE_Z
 
-        if PLACE_X_OFFSET != 0.0 or PLACE_Y_OFFSET != 0.0:
-            self.get_logger().info(
-                f"  Place-Kalibrierung:  "
-                f"[dx={PLACE_X_OFFSET:+.3f}, dy={PLACE_Y_OFFSET:+.3f}]"
-            )
+        self.get_logger().info(
+            f"  Place: ({drop_x:.3f},{drop_y:.3f})  "
+            f"Ablagehoehe: {place_z:.3f} m (fest)"
+        )
 
-        if not self.move(drop_x, drop_y, approach_z, *OR):
+        if not self.move_g(drop_x, drop_y, approach_z, pi, 0.0, 0.0):
             self.get_logger().error("  [FAIL] Place: Anfahrt fehlgeschlagen")
             return False
 
-        if not self.move(drop_x, drop_y, place_z, *OR):
+        if not self.move_g(drop_x, drop_y, place_z, pi, 0.0, 0.0):
             self.get_logger().error("  [FAIL] Place: Absenken fehlgeschlagen")
             return False
 
         self.open_gripper()
         time.sleep(0.4)
 
-        if not self.move(drop_x, drop_y, LIFT_Z, *OR):
+        if not self.move_g(drop_x, drop_y, LIFT_Z, pi, 0.0, 0.0):
             self.get_logger().error("  [FAIL] Place: Abheben fehlgeschlagen")
             return False
 
         return True
+
 
     # ──────────────────────────────────────────────────────
     # Sort-Sequenz
@@ -652,7 +643,7 @@ class PuckSortController(Node):
 
     def sort_puck(self, puck: dict) -> bool:
         label      = puck["label"].lower()
-        px, py, pz = puck["x"], puck["y"], puck["z"]
+        px, py     = puck["x"], puck["y"]
         is_red     = "red" in label
         color_tag  = "[ROT] " if is_red else "[BLAU]"
         color      = "red"   if is_red else "blue"
@@ -662,19 +653,19 @@ class PuckSortController(Node):
         drop_x, drop_y = get_drop_position(color, slot_idx)
 
         self.get_logger().info(
-            f"  {color_tag} '{puck['label']}'  ({px:.3f}, {py:.3f}, {pz:.3f})"
+            f"  {color_tag} '{puck['label']}'  ({px:.3f}, {py:.3f})  "
+            f"z ignoriert -> FIXED_GRASP_Z={FIXED_GRASP_Z:.3f} m"
         )
         self.get_logger().info(
             f"  -> {row_name}  Slot {slot_idx+1}/{N_DROP_SLOTS}  "
-            f"Ziel: ({drop_x:.3f}, {drop_y:.3f}, z~{BOARD_Z+GRASP_OFFSET:.3f})"
+            f"Ziel: ({drop_x:.3f}, {drop_y:.3f})"
         )
 
-        if not self.pick_puck(px, py, pz):
+        if not self.pick_puck(px, py):
             self.get_logger().error("  [FAIL] Greifen fehlgeschlagen")
             self.open_gripper()
             return False
 
-        # Quell-Slot physisch freigeben (falls Puck in einer Reihe lag)
         self._release_physical_slot(px, py)
 
         if not self.place_puck(drop_x, drop_y):
@@ -682,7 +673,6 @@ class PuckSortController(Node):
             self.open_gripper()
             return False
 
-        # Ziel-Slot physisch belegen
         if is_red:
             self._red_slots_occupied.add(slot_idx)
         else:
@@ -690,18 +680,23 @@ class PuckSortController(Node):
 
         return True
 
+
     # ──────────────────────────────────────────────────────
     # Hauptablauf
     # ──────────────────────────────────────────────────────
 
     def run(self):
         self.get_logger().info("╔════════════════════════════════════════════╗")
-        self.get_logger().info("║  IGUS REBEL – PUCK PICK & SORT  v3.2.1   ║")
-        self.get_logger().info("║  Physische Slot-Belegung | kein Stapeln   ║")
+        self.get_logger().info("║  IGUS REBEL – PUCK PICK & SORT  v3.3.0   ║")
+        self.get_logger().info("║  Feste Greif-/Ablagehoehe | kein Stapeln  ║")
         self.get_logger().info("╚════════════════════════════════════════════╝")
         self.get_logger().info(
-            f"  Brett-Z: {BOARD_Z:.3f} m  |  "
-            f"Pick/Place-Hoehe: {BOARD_Z+GRASP_OFFSET:.3f} m"
+            f"  Greifer-Yaw-Offset: {GRIPPER_YAW_OFFSET:.4f} rad "
+            f"({round(GRIPPER_YAW_OFFSET * 180 / pi)}°)"
+        )
+        self.get_logger().info(
+            f"  FIXED_GRASP_Z={FIXED_GRASP_Z:.3f} m  |  "
+            f"FIXED_PLACE_Z={FIXED_PLACE_Z:.3f} m"
         )
         self.get_logger().info(
             f"  Transport: LIFT_Z={LIFT_Z:.3f} m  |  "
@@ -716,25 +711,25 @@ class PuckSortController(Node):
             f"  [BLAU] Reihe 3: x={ROW_BLUE_X:.3f}  "
             f"y=[{ROW_BLUE_Y_START:.3f}..{ROW_BLUE_Y_END:.3f}]"
         )
-        self.get_logger().info(
-            f"  Slot-Toleranz: +-{SLOT_OCCUPY_TOLERANCE:.3f} m  |  "
-            f"Place-Offset: dx={PLACE_X_OFFSET:+.3f}  dy={PLACE_Y_OFFSET:+.3f}"
-        )
 
         self.open_gripper()
         time.sleep(0.3)
         self.go_safe_home()
 
-        # 1. Feld scannen (Y-Sweep + Yaw)
+        # 1. Feld scannen
         pucks = self.scan_field()
 
         if not pucks:
-            self.get_logger().warn("  [WARN] Keine validen Pucks erkannt – zurueck zu Safe Home.")
+            self.get_logger().warn(
+                "  [WARN] Keine validen Pucks erkannt – zurueck zu Safe Home."
+            )
             self.go_safe_home()
             return
 
-        # 2. Physische Belegung BEIDER Reihen vormarkieren
-        self.get_logger().info("── Slot-Check: Physische Vormarkierung (beide Reihen) ─")
+        # 2. Physische Belegung vormarkieren
+        self.get_logger().info(
+            "── Slot-Check: Physische Vormarkierung (beide Reihen) ─"
+        )
         pucks = self._detect_occupied_slots(pucks)
         self.get_logger().info(
             f"  Rote  Slots physisch belegt:  {sorted(self._red_slots_occupied)}"
@@ -743,7 +738,7 @@ class PuckSortController(Node):
             f"  Blaue Slots physisch belegt:  {sorted(self._blue_slots_occupied)}"
         )
 
-        # 3. Falschfarbige Pucks in roter Reihe in blaue Reihe raeumen
+        # 3. Blocker in roter Reihe raeumen
         self.get_logger().info("── Slot-Check: Blocker in roter Reihe ─")
         pucks = self.clear_blocked_red_slots(pucks)
         self.get_logger().info(
@@ -753,7 +748,7 @@ class PuckSortController(Node):
             f"  Blaue Slots nach Freigabe: {sorted(self._blue_slots_occupied)}"
         )
 
-        # 4. Sortierreihenfolge: Rot zuerst, dann Blau; je y-Koordinate aufsteigend
+        # 4. Sortierreihenfolge
         pucks_sorted = sorted(
             pucks,
             key=lambda p: (
@@ -767,7 +762,7 @@ class PuckSortController(Node):
             f"(ROT zuerst, dann BLAU; je y aufsteigend)"
         )
 
-        # 5. Pick & Sort – alle erkannten Pucks abarbeiten
+        # 5. Pick & Sort
         success_count = 0
         fail_count    = 0
 
@@ -797,17 +792,20 @@ class PuckSortController(Node):
         self.open_gripper()
 
 
+
 # ═══════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════
 
+
 _node = None
+
 
 def main():
     global _node
     print("╔════════════════════════════════════════════╗")
-    print("║  IGUS REBEL – PUCK PICK & SORT  v3.2.1   ║")
-    print("║  Physische Slot-Belegung | kein Stapeln   ║")
+    print("║  IGUS REBEL – PUCK PICK & SORT  v3.3.0   ║")
+    print("║  Feste Greif-/Ablagehoehe | kein Stapeln  ║")
     print("╚════════════════════════════════════════════╝")
     rclpy.init()
     try:
@@ -825,6 +823,7 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
         print("[INFO] Node heruntergefahren.")
+
 
 if __name__ == "__main__":
     main()
